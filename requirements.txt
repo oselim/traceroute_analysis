@@ -1,0 +1,6 @@
+wheel
+pyspark==2.3.1
+pyspark-stubs
+backport_ipaddress
+cython
+joblib
