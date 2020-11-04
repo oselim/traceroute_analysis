@@ -1,10 +1,6 @@
 from pyspark.sql import SparkSession
 import subnetwork_util
 from pyspark.sql.functions import concat_ws
-import multiprocessing
-from joblib import Parallel, delayed
-
-num_cores = multiprocessing.cpu_count() - 1
 
 file_name = '/home/selim/data/traceroute-1000lines.txt'
 file_hour_zero = 'file:///home/selim/data/traceroute-2020-10-20T0000'
@@ -58,35 +54,16 @@ subnet_asn_ranged_list = subnet_asn_ranged_df.collect()
 subnet_asn = spark_context.broadcast(subnet_asn_ranged_list)
 
 
-def match_function(subnet, asn, ip_lower, ip_upper, version2, ip, ip_integer, version1):
-    if version1 == version2 and ip_lower <= ip_integer <= ip_upper:
-        return ip, asn
-    return ip, None
-
-
-def find_asn(ip, ip_integer, version1):
-    subnet_asn_list = subnet_asn.value
-    processed_list = Parallel(n_jobs=num_cores)(delayed(match_function)(subnet, asn, ip_lower, ip_upper, version2, ip, ip_integer, version1) for subnet, asn, ip_lower, ip_upper, version2 in subnet_asn_list)
-    return processed_list
-
-
-ip_asn = ip_integer_version_dataframe.map(lambda (ip, ip_integer, version): find_asn(ip, ip_integer, version)).collect()
-print ip_asn
-
-""" untouched function
-
-
-Parallel(n_jobs=num_cores)(delayed(my_function(i,parameters) 
-                                                        for i in inputs)
-
-
-
 def find_asn(ip, ip_integer, version1):
     for subnet, asn, ip_lower, ip_upper, version2 in subnet_asn.value:
         if version1 == version2 and ip_lower <= ip_integer <= ip_upper:
             return ip, asn
     return ip, None
-"""
+
+
+ip_asn = ip_integer_version_dataframe.map(lambda (ip, ip_integer, version): find_asn(ip, ip_integer, version)).collect()
+print ip_asn
+
 
 """
 # for flattening and removing same ip numbers from all the ip_list 
