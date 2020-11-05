@@ -1,6 +1,7 @@
 from pyspark.sql import SparkSession
 import subnetwork_util
 from pyspark.sql.functions import concat_ws
+from operator import add
 
 file_name = '/home/selim/data/traceroute-1000lines.txt'
 file_hour_zero = 'file:///home/selim/data/traceroute-2020-10-20T0000'
@@ -38,49 +39,52 @@ def ip_to_integer(ip):
 
 
 ip_integer_version_dataframe = ip_list.map(lambda ip: ip_to_integer(ip))
+ip_integer_version_cache = ip_integer_version_dataframe.cache()
 
 as_ip_dataframe = spark.read.csv(path=[as_ipv4, as_ipv6], sep='\t').toDF('ip_addr', 'prefix', 'asn')
 asn_df = as_ip_dataframe.withColumn('subnet', concat_ws('/', as_ip_dataframe.ip_addr, as_ip_dataframe.prefix))
 
 
-def lower_upper_network_util(row, subnet):
-    ip_lower, ip_upper, version = subnetwork_util.subnetwork_to_ip_range(subnet)
-    return subnet, row.asn, ip_lower, ip_upper, version
+def lower_upper_network_util(row):
+    ip_lower, ip_upper, version = subnetwork_util.subnetwork_to_ip_range(row.subnet)
+    return row.subnet, row.asn, ip_lower, ip_upper, version
 
 
-subnet_asn_ranged_df = asn_df.rdd.map(lambda row: lower_upper_network_util(row, row.subnet))
-subnet_asn_ranged_list = subnet_asn_ranged_df.collect()
+subnet_asn_ranged_df = asn_df.rdd.map(lambda row: lower_upper_network_util(row))
 
-subnet_asn = spark_context.broadcast(subnet_asn_ranged_list)
+
+def key_value_splitter(row):
+    subnet, asn, ip_lower, ip_upper, version = row
+    if version == '4' or version == 4:
+        first_octet = str(subnet).split('.')[0]
+    else:
+        first_octet = str(subnet).split(':')[0]
+    return first_octet, [row]
+
+
+kv_subnet_asn_df = subnet_asn_ranged_df.map(key_value_splitter)
+reduced_kv_subnet_asn_df = kv_subnet_asn_df.reduceByKey(add)
+asn_dictionary = reduced_kv_subnet_asn_df.collectAsMap()
+broadcast_asn_dictionary = spark_context.broadcast(asn_dictionary)
 
 
 def find_asn(ip, ip_integer, version1):
-    for subnet, asn, ip_lower, ip_upper, version2 in subnet_asn.value:
-        if version1 == version2 and ip_lower <= ip_integer <= ip_upper:
-            return ip, asn
-    return ip, None
+    if version1 == '4' or version1 == 4:
+        first_octet = str(ip).split('.')[0]
+    else:
+        first_octet = str(ip).split(':')[0]
+
+    asn_dictionary_value = broadcast_asn_dictionary.value
+    if first_octet in asn_dictionary_value:
+        search_list = asn_dictionary_value[first_octet]
+        for subnet, asn, ip_lower, ip_upper, version2 in search_list:
+            if version1 == version2:
+                if ip_lower <= ip_integer <= ip_upper:
+                    return ip, asn
+        return ip, None
+    else:
+        return ip, None
 
 
-ip_asn = ip_integer_version_dataframe.map(lambda (ip, ip_integer, version): find_asn(ip, ip_integer, version)).collect()
+ip_asn = ip_integer_version_cache.map(lambda (ip, ip_integer, version): find_asn(ip, ip_integer, version)).collect()
 print ip_asn
-
-
-"""
-# for flattening and removing same ip numbers from all the ip_list 
-"""
-# hops_flattened = hops.flatMap(lambda a: a)
-# from_ip_list = hops_flattened.map(lambda b: b['from']).filter(lambda c: c is not None)
-# unique_from_ip_list = from_ip_list.distinct()
-# print(unique_from_ip_list.collect())
-
-"""
-# for counting the duplicates of ip list: https://stackoverflow.com/a/52072456
-"""
-
-# matched_ip_network = ipv4_broadcast_list.value.filter(lambda net: ip in net).collect()
-# if len(matched_ip_network) == 0:
-#     return ip, None
-# elif len(matched_ip_network) == 1:
-#     return ip, matched_ip_network[0]
-# else:
-#     return ip, matched_ip_network
