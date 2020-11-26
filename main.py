@@ -1,4 +1,6 @@
 from pyspark.sql import SparkSession
+from pyspark.storagelevel import StorageLevel
+
 import subnetwork_util
 from pyspark.sql.functions import concat_ws
 from operator import add
@@ -15,6 +17,7 @@ spark = SparkSession \
     .getOrCreate()
 
 spark_context = spark.sparkContext
+spark_context.setCheckpointDir('/home/selim/data/checkPointDir/')
 
 traceroute_data = spark.read.json(path=file_name)
 result_column = traceroute_data.select('result')
@@ -40,6 +43,7 @@ def ip_to_integer(ip):
 
 ip_integer_version_dataframe = ip_list.map(lambda ip: ip_to_integer(ip))
 ip_integer_version_cache = ip_integer_version_dataframe.cache()
+ip_integer_version_cache.checkpoint()
 
 as_ip_dataframe = spark.read.csv(path=[as_ipv4, as_ipv6], sep='\t').toDF('ip_addr', 'prefix', 'asn')
 asn_df = as_ip_dataframe.withColumn('subnet', concat_ws('/', as_ip_dataframe.ip_addr, as_ip_dataframe.prefix))
@@ -64,6 +68,8 @@ def key_value_splitter(row):
 
 kv_subnet_asn_df = subnet_asn_ranged_df.map(key_value_splitter)
 reduced_kv_subnet_asn_df = kv_subnet_asn_df.reduceByKey(add)
+reduced_kv_subnet_asn_df_cached = reduced_kv_subnet_asn_df.cache()
+reduced_kv_subnet_asn_df_cached.checkpoint()
 asn_dictionary = reduced_kv_subnet_asn_df.collectAsMap()
 broadcast_asn_dictionary = spark_context.broadcast(asn_dictionary)
 
@@ -80,11 +86,20 @@ def find_asn(ip, ip_integer, version1):
         for subnet, asn, ip_lower, ip_upper, version2 in search_list:
             if version1 == version2:
                 if ip_lower <= ip_integer <= ip_upper:
-                    return ip, asn
-        return ip, None
+                    return str(ip), str(asn)
+        return str(ip), None
     else:
-        return ip, None
+        return str(ip), None
 
 
-ip_asn = ip_integer_version_cache.map(lambda (ip, ip_integer, version): find_asn(ip, ip_integer, version)).collect()
+ip_asn = ip_integer_version_cache.map(lambda (ip, ip_integer, version): find_asn(ip, ip_integer, version))
+cached_ip_asn = ip_asn.cache()
+cached_ip_asn = ip_asn.persist(StorageLevel.DISK_ONLY)
+cached_ip_asn.checkpoint()
+cached_ip_asn.coalesce(numPartitions=1, shuffle=False).saveAsTextFile('/traceroute/data/results')
 print ip_asn
+
+ip_asn.sample(withReplacement=False, fraction=0.1)
+ip_asn.toDF().write.csv(path='/traceroute/data/results/ipAsnDf.csv', sep=',', header=True)
+ip_asn.toDF().repartition(1)
+
